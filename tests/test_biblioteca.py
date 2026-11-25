@@ -18,12 +18,14 @@ class InterfaceTestCase(unittest.TestCase):
         self._orig_livros = Biblioteca.arquivoLivros
         self._orig_cats = Biblioteca.arquivoCategorias
         self._orig_desejos = Biblioteca.arquivoListaDesejo
+        self._orig_capas = Biblioteca.pastaCapas
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp_dir.cleanup)
 
         Biblioteca.arquivoLivros = os.path.join(self.tmp_dir.name, "Arquivos", "Livros.csv")
         Biblioteca.arquivoCategorias = os.path.join(self.tmp_dir.name, "Arquivos", "Categorias.csv")
         Biblioteca.arquivoListaDesejo = os.path.join(self.tmp_dir.name, "Arquivos", "ListaDesejos.csv")
+        Biblioteca.pastaCapas = os.path.join(self.tmp_dir.name, "Arquivos", "Capas")
         os.makedirs(os.path.dirname(Biblioteca.arquivoLivros), exist_ok=True)
         with open(Biblioteca.arquivoCategorias, "w", encoding="utf-8") as f:
             f.write("Ficção\nRomance\n")
@@ -47,6 +49,7 @@ class InterfaceTestCase(unittest.TestCase):
         Biblioteca.arquivoLivros = self._orig_livros
         Biblioteca.arquivoCategorias = self._orig_cats
         Biblioteca.arquivoListaDesejo = self._orig_desejos
+        Biblioteca.pastaCapas = self._orig_capas
 
     def test_validar_preco_e_filtros(self):
         self.assertEqual(Interface._validar_preco_texto("49,90"), 49.9)
@@ -73,7 +76,14 @@ class InterfaceTestCase(unittest.TestCase):
         try:
             app.withdraw()
             app.update_idletasks()
-            # Inicia diretamente em Meus Livros (sem página Início separada)
+            # Inicia na página de Boas-Vindas
+            self.assertEqual(app.tela_atual, "boas_vindas")
+            self.assertEqual(app.lbl_boas_vindas_topo.cget("text"), "Seja bem vindo")
+            self.assertEqual(app.lbl_boas_vindas_titulo.cget("text"), "à Biblioteca de Livros")
+
+            # Vai para Meus Livros
+            app.ir_para("livros")
+            app.update_idletasks()
             self.assertEqual(app.tela_atual, "livros")
             self.assertEqual(len(app.itens_visiveis), 2)
             self.assertEqual(app.lbl_kpi_qtd.cget("text"), "2")
@@ -124,10 +134,21 @@ class InterfaceTestCase(unittest.TestCase):
             self.assertEqual(str(app.tree.column("autor", "anchor")), "center")
             self.assertEqual(str(app.tree.column("valor", "anchor")), "center")
 
-            # Vai para Como Usar e verifica DialogoCategorias organizado
+            # Vai para Como Usar, verifica bind/hover do título "Biblioteca" + linha e retorna para Boas-Vindas
             app.ir_para("como_usar")
             app.update_idletasks()
             self.assertEqual(app.tela_atual, "como_usar")
+            self.assertTrue(app.lbl_titulo_biblioteca.bind("<Button-1>"))
+            self.assertTrue(app.linha_titulo_biblioteca.bind("<Button-1>"))
+            app._atualizar_hover_titulo(True)
+            self.assertEqual(app.lbl_titulo_biblioteca.cget("fg"), Interface.PALETA["texto_suave"])
+            self.assertEqual(app.linha_titulo_biblioteca.cget("bg"), Interface.PALETA["texto_suave"])
+            app._atualizar_hover_titulo(False)
+            self.assertEqual(app.lbl_titulo_biblioteca.cget("fg"), Interface.PALETA["texto_creme"])
+            self.assertEqual(app.linha_titulo_biblioteca.cget("bg"), Interface.PALETA["acento_suave"])
+            app.ir_para("boas_vindas")
+            app.update_idletasks()
+            self.assertEqual(app.tela_atual, "boas_vindas")
 
             dlg = Interface.DialogoCategorias(app)
             dlg.update_idletasks()
@@ -139,6 +160,83 @@ class InterfaceTestCase(unittest.TestCase):
             self.assertGreater(dlg.btn_editar_cat.winfo_reqheight(), 0)
             self.assertGreater(dlg.btn_deletar_cat.winfo_reqheight(), 0)
             dlg.destroy()
+        finally:
+            app.destroy()
+
+    def test_dialogo_livro_com_imagem_lado_direito(self):
+        img_exemplo = os.path.join(WORKSPACE, "Arquivos", "Imagens", "Tabela.png")
+        self.assertTrue(os.path.exists(img_exemplo))
+
+        app = Interface.BibliotecaApp()
+        try:
+            app.withdraw()
+            dlg = Interface.DialogoLivro(app, com_favorito=True)
+            try:
+                dlg.update_idletasks()
+                # Coluna esquerda e coluna direita existem e têm mesma configuração uniforme
+                self.assertGreater(dlg.col_esquerda.winfo_reqheight(), 0)
+                self.assertGreater(dlg.box_capa.winfo_reqheight(), 0)
+
+                # Selecionar imagem, preencher dados e confirmar
+                dlg._definir_imagem_selecionada(img_exemplo)
+                self.assertIsNotNone(dlg._photo_capa)
+
+                # Testar imagem vertical (capa retrato pequena): deve ampliar quase até as bordas superior e inferior
+                capa_retrato = os.path.join(self.tmp_dir.name, "retrato.png")
+                img_tmp = Interface.tk.PhotoImage(width=100, height=160)
+                img_tmp.put("{#286451}", to=(0, 0, 100, 160))
+                img_tmp.write(capa_retrato, format="png")
+                dlg._definir_imagem_selecionada(capa_retrato)
+                self.assertIsNotNone(dlg._photo_capa)
+                alvo_w, alvo_h = dlg._dimensoes_area_capa()
+                self.assertGreaterEqual(dlg._photo_capa.height(), alvo_h - 5)
+
+                dlg.var_nome.set("Duna Ilustrado")
+                dlg.var_fav.set(True)
+                dlg.var_cat.set("Ficção")
+                dlg.var_autor.set("Frank Herbert")
+                dlg.var_valor.set("89,90")
+                dlg._confirmar()
+
+                self.assertIsNotNone(dlg.resultado)
+                campos, valor, capa_nome = dlg.resultado
+                self.assertEqual(campos, ["Duna Ilustrado", "★", "Ficção", "Frank Herbert"])
+                self.assertEqual(valor, 89.90)
+                self.assertTrue(capa_nome.endswith(".png"))
+                self.assertTrue(os.path.exists(os.path.join(Biblioteca.pastaCapas, capa_nome)))
+
+                # Salvar no CSV e validar persistência + preservação ao alternar favorito
+                Biblioteca._adicionar_registro(Biblioteca.arquivoLivros, campos, valor, capa=capa_nome)
+                linhas, validos, _ = Biblioteca._carregar_linhas_arquivo(Biblioteca.arquivoLivros, True)
+                self.assertEqual(Biblioteca._extrair_capa_linha(linhas[-1], True), capa_nome)
+
+                app.ir_para("livros")
+                idx_ultimo = str(len(app.itens_visiveis) - 1)
+                app.tree.selection_set(idx_ultimo)
+                app.alternar_favorito_selecionado()
+                linhas_apos, _, _ = Biblioteca._carregar_linhas_arquivo(Biblioteca.arquivoLivros, True)
+                self.assertEqual(Biblioteca._extrair_capa_linha(linhas_apos[-1], True), capa_nome)
+            finally:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+
+            # Testar remoção de imagem na edição
+            dlg_edit = Interface.DialogoLivro(
+                app,
+                com_favorito=True,
+                dados_iniciais=("Duna Ilustrado", "~", "Ficção", "Frank Herbert", 89.90),
+                capa_inicial=capa_nome,
+            )
+            try:
+                dlg_edit.update_idletasks()
+                self.assertIsNotNone(dlg_edit._photo_capa)
+                dlg_edit._remover_imagem()
+                self.assertIsNone(dlg_edit._photo_capa)
+                dlg_edit._confirmar()
+                self.assertEqual(dlg_edit.resultado[2], "")
+            finally:
+                if dlg_edit.winfo_exists():
+                    dlg_edit.destroy()
         finally:
             app.destroy()
 

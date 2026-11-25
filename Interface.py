@@ -1,6 +1,11 @@
 import math
+import os
+import shutil
+import subprocess
+import tempfile
 import tkinter as tk
-from tkinter import messagebox, ttk
+import uuid
+from tkinter import filedialog, messagebox, ttk
 
 import Biblioteca
 
@@ -188,21 +193,115 @@ def _ordenar_itens(itens, coluna, reverso, com_favorito):
     return sorted(itens, key=chave, reverse=reverso)
 
 
-class DialogoLivro(tk.Toplevel):
-    """Modal estilizado para cadastro e edição de livros."""
+def _resolver_caminho_capa(capa_ref):
+    """Resolve o caminho completo da imagem de capa (relativo a pastaCapas ou absoluto)."""
+    ref = (capa_ref or "").strip()
+    if not ref:
+        return ""
+    if os.path.isabs(ref):
+        return ref
+    return os.path.join(Biblioteca.pastaCapas, ref)
 
-    def __init__(self, pai, com_favorito=True, dados_iniciais=None):
+
+def _converter_para_png_redimensionado(origem, destino, max_w=340, max_h=340, permitir_ampliar=True):
+    """Converte e redimensiona uma imagem para PNG mantendo proporção (Windows/fallback)."""
+    if not os.path.exists(origem):
+        return False
+
+    if os.name == "nt":
+        ps_script = (
+            "Add-Type -AssemblyName System.Drawing; "
+            "$src=$env:CAPA_SRC; $dst=$env:CAPA_DST; "
+            "$mw=[int]$env:CAPA_W; $mh=[int]$env:CAPA_H; "
+            "$amp=$env:CAPA_AMP -eq '1'; "
+            "$img=[System.Drawing.Image]::FromFile($src); "
+            "$ratio=[Math]::Min($mw/$img.Width, $mh/$img.Height); "
+            "if(-not $amp -and $ratio -gt 1){$ratio=1}; "
+            "$nw=[Math]::Max(1,[int][Math]::Round($img.Width*$ratio)); "
+            "$nh=[Math]::Max(1,[int][Math]::Round($img.Height*$ratio)); "
+            "$bmp=New-Object System.Drawing.Bitmap($nw,$nh); "
+            "$g=[System.Drawing.Graphics]::FromImage($bmp); "
+            "$g.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; "
+            "$g.DrawImage($img,0,0,$nw,$nh); "
+            "$bmp.Save($dst,[System.Drawing.Imaging.ImageFormat]::Png); "
+            "$g.Dispose(); $bmp.Dispose(); $img.Dispose()"
+        )
+        env = {
+            **os.environ,
+            "CAPA_SRC": os.path.abspath(origem),
+            "CAPA_DST": os.path.abspath(destino),
+            "CAPA_W": str(max_w),
+            "CAPA_H": str(max_h),
+            "CAPA_AMP": "1" if permitir_ampliar else "0",
+        }
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            env=env,
+            capture_output=True,
+            text=True,
+            creationflags=flags,
+            timeout=15,
+        )
+        if res.returncode == 0 and os.path.exists(destino):
+            return True
+
+    ext = os.path.splitext(origem)[1].lower()
+    if ext in (".png", ".gif", ".ppm"):
+        shutil.copy2(origem, destino)
+        return True
+    return False
+
+
+def _carregar_photoimage_capa(caminho, max_w=340, max_h=340):
+    """Carrega uma imagem em tk.PhotoImage ajustando escala se necessário."""
+    if not caminho or not os.path.exists(caminho):
+        return None
+    try:
+        img = tk.PhotoImage(file=caminho)
+    except tk.TclError:
+        return None
+
+    w, h = img.width(), img.height()
+    if w > max_w or h > max_h:
+        fator = max(math.ceil(w / max_w), math.ceil(h / max_h))
+        if fator > 1:
+            img = img.subsample(fator, fator)
+    return img
+
+
+def _salvar_capa_definitiva(caminho_origem, max_w=340, max_h=340):
+    """Salva uma cópia redimensionada em Arquivos/Capas e retorna o nome do arquivo."""
+    os.makedirs(Biblioteca.pastaCapas, exist_ok=True)
+    nome_arquivo = f"capa_{uuid.uuid4().hex[:10]}.png"
+    destino = os.path.join(Biblioteca.pastaCapas, nome_arquivo)
+    if _converter_para_png_redimensionado(caminho_origem, destino, max_w=max_w, max_h=max_h):
+        return nome_arquivo
+    return ""
+
+
+class DialogoLivro(tk.Toplevel):
+    """Modal estilizado para cadastro e edição de livros com área lateral para capa."""
+
+    def __init__(self, pai, com_favorito=True, dados_iniciais=None, capa_inicial=""):
         super().__init__(pai)
         self.resultado = None
         self.com_favorito = com_favorito
         self.editando = dados_iniciais is not None
 
+        self._capa_atual = (capa_inicial or "").strip()
+        self._nova_imagem_origem = ""
+        self._capa_removida = False
+        self._temp_preview = ""
+        self._photo_capa = None
+
         titulo_janela = "Editar Livro" if self.editando else "Novo Livro"
         self.title(titulo_janela)
         self.configure(bg=PALETA["bg_principal"])
-        self.resizable(False, False)
+        self.minsize(740, 480)
         self.transient(pai)
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         container = tk.Frame(
             self,
@@ -213,6 +312,8 @@ class DialogoLivro(tk.Toplevel):
             highlightbackground=PALETA["acento"],
         )
         container.pack(fill="both", expand=True, padx=14, pady=14)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
 
         tk.Label(
             container,
@@ -220,7 +321,7 @@ class DialogoLivro(tk.Toplevel):
             bg=PALETA["bg_card"],
             fg=PALETA["texto_creme"],
             font=("Segoe UI", 14, "bold"),
-        ).pack(anchor="w", pady=(0, 12))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
 
         if dados_iniciais is not None:
             if com_favorito:
@@ -238,11 +339,22 @@ class DialogoLivro(tk.Toplevel):
         self.var_autor = tk.StringVar(value=autor_ini)
         self.var_valor = tk.StringVar(value=valor_str)
 
-        self.entry_nome = self._campo_texto(container, "Título do Livro", self.var_nome)
+        # Grade com duas colunas de mesmo tamanho (formulário à esquerda, imagem à direita)
+        grade = tk.Frame(container, bg=PALETA["bg_card"])
+        grade.grid(row=1, column=0, sticky="nsew")
+        grade.columnconfigure(0, weight=1, uniform="col_livro")
+        grade.columnconfigure(1, weight=1, uniform="col_livro")
+        grade.rowconfigure(0, weight=1)
+
+        # Coluna esquerda: dados do livro
+        self.col_esquerda = tk.Frame(grade, bg=PALETA["bg_card"])
+        self.col_esquerda.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+
+        self.entry_nome = self._campo_texto(self.col_esquerda, "Título do Livro", self.var_nome)
 
         if com_favorito:
             chk = tk.Checkbutton(
-                container,
+                self.col_esquerda,
                 text="Marcar como Favorito (★)",
                 variable=self.var_fav,
                 bg=PALETA["bg_card"],
@@ -256,7 +368,7 @@ class DialogoLivro(tk.Toplevel):
             chk.pack(anchor="w", pady=(2, 10))
 
         tk.Label(
-            container,
+            self.col_esquerda,
             text="Categoria (escolha ou digite uma nova)",
             bg=PALETA["bg_card"],
             fg=PALETA["texto_suave"],
@@ -264,7 +376,7 @@ class DialogoLivro(tk.Toplevel):
         ).pack(anchor="w")
         categorias = Biblioteca._ler_categorias()
         self.combo_cat = ttk.Combobox(
-            container,
+            self.col_esquerda,
             textvariable=self.var_cat,
             values=categorias,
             font=FONTE_PADRAO,
@@ -272,11 +384,76 @@ class DialogoLivro(tk.Toplevel):
         )
         self.combo_cat.pack(fill="x", pady=(4, 10), ipady=4)
 
-        self._campo_texto(container, "Autor", self.var_autor)
-        self._campo_texto(container, "Valor (R$)", self.var_valor)
+        self._campo_texto(self.col_esquerda, "Autor", self.var_autor)
+        self._campo_texto(self.col_esquerda, "Valor (R$)", self.var_valor, pady_bottom=0)
 
+        # Coluna direita (mesmo tamanho): área opcional da imagem do livro
+        self.col_direita = tk.Frame(grade, bg=PALETA["bg_card"])
+        self.col_direita.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        self.col_direita.columnconfigure(0, weight=1)
+        self.col_direita.rowconfigure(1, weight=1)
+
+        tk.Label(
+            self.col_direita,
+            text="Capa do Livro (Opcional)",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_suave"],
+            font=FONTE_CARD_LABEL,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        self.box_capa = tk.Frame(
+            self.col_direita,
+            bg=PALETA["bg_principal"],
+            highlightthickness=1,
+            highlightbackground=PALETA["acento_suave"],
+            cursor="hand2",
+        )
+        self.box_capa.grid(row=1, column=0, sticky="nsew")
+        self.box_capa.pack_propagate(False)
+
+        self.lbl_preview_capa = tk.Label(
+            self.box_capa,
+            text="",
+            bg=PALETA["bg_principal"],
+            fg=PALETA["texto_suave"],
+            font=FONTE_PADRAO,
+            justify="center",
+            cursor="hand2",
+        )
+        self.lbl_preview_capa.pack(fill="both", expand=True, padx=3, pady=3)
+        self.box_capa.bind("<Button-1>", lambda _e: self._escolher_imagem())
+        self.lbl_preview_capa.bind("<Button-1>", lambda _e: self._escolher_imagem())
+
+        acoes_capa = tk.Frame(self.col_direita, bg=PALETA["bg_card"])
+        acoes_capa.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        self.btn_escolher_capa = _criar_botao(
+            acoes_capa,
+            "Escolher Imagem",
+            self._escolher_imagem,
+            bg=PALETA["acento"],
+            fg=PALETA["texto_creme"],
+            hover_bg=PALETA["acento_suave"],
+            padx=12,
+            pady=6,
+        )
+        self.btn_escolher_capa.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.btn_remover_capa = _criar_botao(
+            acoes_capa,
+            "Remover",
+            self._remover_imagem,
+            bg=PALETA["bg_principal"],
+            fg=PALETA["texto_suave"],
+            hover_bg=PALETA["perigo_hover"],
+            padx=10,
+            pady=6,
+        )
+        self.btn_remover_capa.pack(side="right")
+
+        # Rodapé principal (Cancelar / Salvar)
         botoes = tk.Frame(container, bg=PALETA["bg_card"])
-        botoes.pack(fill="x", pady=(12, 0))
+        botoes.grid(row=2, column=0, sticky="ew", pady=(16, 0))
 
         btn_salvar = _criar_botao(
             botoes,
@@ -301,11 +478,108 @@ class DialogoLivro(tk.Toplevel):
         self.bind("<Return>", lambda _e: self._confirmar())
         self.bind("<Escape>", lambda _e: self.destroy())
 
-        altura = 435 if com_favorito else 395
-        _centralizar_janela(self, 420, altura, pai=pai)
+        altura = 500 if com_favorito else 460
+        _centralizar_janela(self, 780, altura, pai=pai)
+        self.update_idletasks()
+        self._atualizar_preview_capa(_resolver_caminho_capa(self._capa_atual))
         self.entry_nome.focus_set()
 
-    def _campo_texto(self, parent, rotulo, var):
+    def destroy(self):
+        self._limpar_temp_preview()
+        super().destroy()
+
+    def _limpar_temp_preview(self):
+        if self._temp_preview and os.path.exists(self._temp_preview):
+            try:
+                os.remove(self._temp_preview)
+            except OSError:
+                pass
+        self._temp_preview = ""
+
+    def _escolher_imagem(self):
+        caminho = filedialog.askopenfilename(
+            parent=self,
+            title="Selecionar imagem da capa",
+            filetypes=[
+                ("Imagens", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Todos os arquivos", "*.*"),
+            ],
+        )
+        if not caminho:
+            return
+        self._definir_imagem_selecionada(caminho)
+
+    def _dimensoes_area_capa(self):
+        """Retorna largura e altura úteis da caixa de capa (quase encostando nas bordas)."""
+        self.update_idletasks()
+        w = self.box_capa.winfo_width()
+        h = self.box_capa.winfo_height()
+        if w < 80:
+            w = 340
+        if h < 80:
+            h = 330 if self.com_favorito else 290
+        return max(120, w - 8), max(120, h - 8)
+
+    def _definir_imagem_selecionada(self, caminho):
+        """Define o caminho de imagem escolhido pelo usuário e atualiza a pré-visualização."""
+        self._limpar_temp_preview()
+        alvo_w, alvo_h = self._dimensoes_area_capa()
+        fd, temp_png = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        if _converter_para_png_redimensionado(caminho, temp_png, max_w=alvo_w, max_h=alvo_h):
+            self._temp_preview = temp_png
+            self._nova_imagem_origem = caminho
+            self._capa_removida = False
+            self._atualizar_preview_capa(temp_png)
+        else:
+            if os.path.exists(temp_png):
+                os.remove(temp_png)
+            messagebox.showwarning(
+                "Imagem não suportada",
+                "Não foi possível carregar essa imagem. Tente um arquivo PNG, JPG, GIF ou BMP.",
+                parent=self,
+            )
+
+    def _remover_imagem(self):
+        self._limpar_temp_preview()
+        self._nova_imagem_origem = ""
+        self._capa_removida = True
+        self._atualizar_preview_capa("")
+
+    def _atualizar_preview_capa(self, caminho):
+        alvo_w, alvo_h = self._dimensoes_area_capa()
+        img = None
+        if caminho and os.path.exists(caminho):
+            img = _carregar_photoimage_capa(caminho, max_w=alvo_w, max_h=alvo_h)
+            if img is not None and img.width() < alvo_w * 0.85 and img.height() < alvo_h * 0.85:
+                # Re-escala uma capa já salva menor para preencher até perto das bordas
+                fd, temp_png = tempfile.mkstemp(suffix=".png")
+                os.close(fd)
+                if _converter_para_png_redimensionado(caminho, temp_png, max_w=alvo_w, max_h=alvo_h):
+                    self._limpar_temp_preview()
+                    self._temp_preview = temp_png
+                    img = _carregar_photoimage_capa(temp_png, max_w=alvo_w, max_h=alvo_h)
+                elif os.path.exists(temp_png):
+                    os.remove(temp_png)
+
+        if img is not None:
+            self._photo_capa = img
+            self.lbl_preview_capa.configure(image=self._photo_capa, text="")
+            self.btn_remover_capa.configure(state="normal")
+        else:
+            self._photo_capa = None
+            self.lbl_preview_capa.configure(
+                image="",
+                text=(
+                    "Nenhuma imagem selecionada\n\n"
+                    "Clique aqui ou em 'Escolher Imagem'\n"
+                    "para adicionar a capa do livro\n"
+                    "(PNG, JPG, GIF, BMP)"
+                ),
+            )
+            self.btn_remover_capa.configure(state="disabled")
+
+    def _campo_texto(self, parent, rotulo, var, pady_bottom=10):
         tk.Label(
             parent,
             text=rotulo,
@@ -325,7 +599,7 @@ class DialogoLivro(tk.Toplevel):
             highlightcolor=PALETA["texto_creme"],
             font=FONTE_PADRAO,
         )
-        entrada.pack(fill="x", pady=(4, 10), ipady=6)
+        entrada.pack(fill="x", pady=(4, pady_bottom), ipady=6)
         return entrada
 
     def _confirmar(self):
@@ -341,12 +615,20 @@ class DialogoLivro(tk.Toplevel):
             messagebox.showwarning("Valor inválido", "Informe um valor numérico válido (>= 0).", parent=self)
             return
 
+        if self._nova_imagem_origem:
+            alvo_w, alvo_h = self._dimensoes_area_capa()
+            capa_final = _salvar_capa_definitiva(self._nova_imagem_origem, max_w=alvo_w, max_h=alvo_h)
+        elif self._capa_removida:
+            capa_final = ""
+        else:
+            capa_final = self._capa_atual
+
         categoria_final = Biblioteca._adicionar_categoria(categoria)
         if self.com_favorito:
             favorito = "★" if self.var_fav.get() else "~"
-            self.resultado = ([nome, favorito, categoria_final, autor], valor)
+            self.resultado = ([nome, favorito, categoria_final, autor], valor, capa_final)
         else:
-            self.resultado = ([nome, categoria_final, autor], valor)
+            self.resultado = ([nome, categoria_final, autor], valor, capa_final)
         self.destroy()
 
 
@@ -816,7 +1098,7 @@ class BibliotecaApp(tk.Tk):
         self.minsize(1040, 660)
         _centralizar_janela(self, 1180, 720)
 
-        self.tela_atual = "livros"  # "livros" | "desejos" | "como_usar"
+        self.tela_atual = "boas_vindas"  # "boas_vindas" | "livros" | "desejos" | "como_usar"
         self.sidebar_retraida = False
         self.linhas_brutas = []
         self.todos_validos = []
@@ -834,7 +1116,7 @@ class BibliotecaApp(tk.Tk):
         self._configurar_estilos()
         self._construir_layout()
         self._configurar_atalhos()
-        self.ir_para("livros")
+        self.ir_para("boas_vindas")
 
     def _configurar_estilos(self):
         style = ttk.Style(self)
@@ -930,23 +1212,47 @@ class BibliotecaApp(tk.Tk):
         self.topo_sidebar = tk.Frame(self.sidebar, bg=PALETA["bg_card"], padx=10, pady=12)
         self.topo_sidebar.pack(fill="x")
 
-        self.box_titulo_sidebar = tk.Frame(self.topo_sidebar, bg=PALETA["bg_card"])
+        self.box_titulo_sidebar = tk.Frame(self.topo_sidebar, bg=PALETA["bg_card"], cursor="hand2")
         self.box_titulo_sidebar.pack(side="left", fill="x", expand=True)
 
-        tk.Label(
+        self.lbl_titulo_biblioteca = tk.Label(
             self.box_titulo_sidebar,
             text="Biblioteca",
             bg=PALETA["bg_card"],
             fg=PALETA["texto_creme"],
             font=("Segoe UI", 16, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
+            cursor="hand2",
+        )
+        self.lbl_titulo_biblioteca.pack(anchor="w")
+
+        self.linha_titulo_biblioteca = tk.Frame(
+            self.box_titulo_sidebar,
+            bg=PALETA["acento_suave"],
+            height=2,
+            width=105,
+            cursor="hand2",
+        )
+        self.linha_titulo_biblioteca.pack(anchor="w", pady=(1, 4))
+
+        self.lbl_subtitulo_biblioteca = tk.Label(
             self.box_titulo_sidebar,
             text="Gerenciador de Livros",
             bg=PALETA["bg_card"],
             fg=PALETA["texto_suave"],
             font=("Segoe UI", 9),
-        ).pack(anchor="w")
+            cursor="hand2",
+        )
+        self.lbl_subtitulo_biblioteca.pack(anchor="w")
+
+        for widget_titulo in (
+            self.box_titulo_sidebar,
+            self.lbl_titulo_biblioteca,
+            self.linha_titulo_biblioteca,
+            self.lbl_subtitulo_biblioteca,
+        ):
+            widget_titulo.bind("<Button-1>", lambda _e: self.ir_para("boas_vindas"))
+            widget_titulo.bind("<Enter>", lambda _e: self._atualizar_hover_titulo(True))
+            widget_titulo.bind("<Leave>", lambda _e: self._atualizar_hover_titulo(False))
 
         self.btn_toggle_sidebar = tk.Button(
             self.topo_sidebar,
@@ -992,6 +1298,7 @@ class BibliotecaApp(tk.Tk):
         self.area_conteudo = tk.Frame(raiz, bg=PALETA["bg_principal"])
         self.area_conteudo.pack(side="right", fill="both", expand=True)
 
+        self._construir_tela_boas_vindas()
         self._construir_tela_lista()
         self._construir_tela_como_usar()
 
@@ -1021,6 +1328,15 @@ class BibliotecaApp(tk.Tk):
         btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=b._bg_base))
         return btn
 
+    def _atualizar_hover_titulo(self, em_hover):
+        """Atualiza a cor do título Biblioteca e da linha abaixo ao passar o mouse."""
+        if em_hover:
+            self.lbl_titulo_biblioteca.configure(fg=PALETA["texto_suave"])
+            self.linha_titulo_biblioteca.configure(bg=PALETA["texto_suave"])
+        else:
+            self.lbl_titulo_biblioteca.configure(fg=PALETA["texto_creme"])
+            self.linha_titulo_biblioteca.configure(bg=PALETA["acento_suave"])
+
     def _atualizar_hover_toggle(self, em_hover):
         """Atualiza fundo e ícone do botão de recolher/estender no hover."""
         if em_hover:
@@ -1048,6 +1364,132 @@ class BibliotecaApp(tk.Tk):
             self.btn_toggle_sidebar.configure(image=self.icone_retrair, bg=PALETA["bg_principal"])
             self.btn_toggle_sidebar.pack(side="right", anchor="n")
             self.corpo_sidebar.pack(fill="both", expand=True)
+
+    def _construir_tela_boas_vindas(self):
+        """Constrói a página inicial de boas-vindas do projeto."""
+        self.frame_boas_vindas = tk.Frame(self.area_conteudo, bg=PALETA["bg_principal"], padx=32, pady=28)
+
+        # Banner de topo: "Seja bem vindo" / "à Biblioteca de Livros"
+        hero = tk.Frame(
+            self.frame_boas_vindas,
+            bg=PALETA["bg_card"],
+            padx=26,
+            pady=24,
+            highlightthickness=1,
+            highlightbackground=PALETA["acento"],
+        )
+        hero.pack(fill="x", pady=(0, 18))
+
+        self.lbl_boas_vindas_topo = tk.Label(
+            hero,
+            text="Seja bem vindo",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_suave"],
+            font=("Segoe UI", 14, "bold"),
+        )
+        self.lbl_boas_vindas_topo.pack(anchor="w")
+
+        self.lbl_boas_vindas_titulo = tk.Label(
+            hero,
+            text="à Biblioteca de Livros",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_creme"],
+            font=("Segoe UI", 26, "bold"),
+        )
+        self.lbl_boas_vindas_titulo.pack(anchor="w", pady=(2, 8))
+
+        tk.Label(
+            hero,
+            text="Gerencie os livros que você já possui, organize favoritos, categorias e acompanhe sua lista de desejos em um só lugar.",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_suave"],
+            font=FONTE_PADRAO,
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w")
+
+        # Cards de apresentação (Trabalho Facultativo + Linguagens Usadas)
+        grid_info = tk.Frame(self.frame_boas_vindas, bg=PALETA["bg_principal"])
+        grid_info.pack(fill="both", expand=True)
+        grid_info.columnconfigure((0, 1), weight=1, uniform="info_home")
+        grid_info.rowconfigure(0, weight=1)
+
+        card_sobre = tk.Frame(
+            grid_info,
+            bg=PALETA["bg_card"],
+            padx=22,
+            pady=20,
+            highlightthickness=1,
+            highlightbackground=PALETA["acento"],
+        )
+        card_sobre.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+        tk.Label(
+            card_sobre,
+            text="Sobre o Projeto",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_creme"],
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        tk.Label(
+            card_sobre,
+            text=(
+                "Este projeto foi criado por Adriano Barnard Medeiros como um trabalho "
+                "facultativo (avaliativo) para a disciplina de Fundamentos da Programação.\n\n"
+                "O objetivo é oferecer uma forma prática e visual de catalogar livros comprados, "
+                "controlar gastos, marcar favoritos, anexar imagens de capa e planejar futuras leituras."
+            ),
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_suave"],
+            font=FONTE_PADRAO,
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", fill="both", expand=True)
+
+        card_tech = tk.Frame(
+            grid_info,
+            bg=PALETA["bg_card"],
+            padx=22,
+            pady=20,
+            highlightthickness=1,
+            highlightbackground=PALETA["acento"],
+        )
+        card_tech.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+
+        tk.Label(
+            card_tech,
+            text="Linguagens e Tecnologias Usadas",
+            bg=PALETA["bg_card"],
+            fg=PALETA["texto_creme"],
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        tecnologias = [
+            ("Python 3", "Lógica da aplicação, manipulação de arquivos e testes automatizados (unittest)."),
+            ("Tkinter / ttk", "Interface gráfica nativa com paleta esmeralda e creme personalizada."),
+            ("CSV", "Armazenamento local leve dos livros, lista de desejos e categorias."),
+            ("PowerShell / .NET", "Conversão e redimensionamento das imagens de capa no Windows."),
+        ]
+        for nome_t, desc_t in tecnologias:
+            linha_t = tk.Frame(card_tech, bg=PALETA["bg_principal"], padx=10, pady=7)
+            linha_t.pack(fill="x", pady=4)
+            tk.Label(
+                linha_t,
+                text=nome_t,
+                bg=PALETA["bg_principal"],
+                fg=PALETA["texto_creme"],
+                font=FONTE_BOTAO,
+            ).pack(anchor="w")
+            tk.Label(
+                linha_t,
+                text=desc_t,
+                bg=PALETA["bg_principal"],
+                fg=PALETA["texto_suave"],
+                font=("Segoe UI", 9),
+                wraplength=330,
+                justify="left",
+            ).pack(anchor="w")
 
     def _construir_tela_lista(self):
         self.frame_lista = tk.Frame(self.area_conteudo, bg=PALETA["bg_principal"])
@@ -1421,18 +1863,21 @@ class BibliotecaApp(tk.Tk):
             self.ir_para("livros")
 
     def ir_para(self, tela):
-        """Alterna entre Meus Livros, Lista de Desejos e Como Usar."""
+        """Alterna entre Boas-Vindas, Meus Livros, Lista de Desejos e Como Usar."""
         self.tela_atual = tela
         self.ordem_coluna = None
         self.ordem_reversa = False
         self._suprimir_trace = False
 
+        self.frame_boas_vindas.pack_forget()
         self.frame_lista.pack_forget()
         self.frame_como_usar.pack_forget()
 
         self._atualizar_sidebar()
 
-        if tela == "como_usar":
+        if tela == "boas_vindas":
+            self.frame_boas_vindas.pack(fill="both", expand=True)
+        elif tela == "como_usar":
             self.frame_como_usar.pack(fill="both", expand=True)
         else:
             self.linhas_brutas = []
@@ -1620,8 +2065,8 @@ class BibliotecaApp(tk.Tk):
         self.wait_window(dialogo)
         if dialogo.resultado is None:
             return
-        campos, valor = dialogo.resultado
-        Biblioteca._adicionar_registro(self._caminho_ativo(), campos, valor)
+        campos, valor, capa = dialogo.resultado
+        Biblioteca._adicionar_registro(self._caminho_ativo(), campos, valor, capa=capa)
         self.recarregar_dados()
 
     def editar_selecionado(self):
@@ -1631,14 +2076,22 @@ class BibliotecaApp(tk.Tk):
         idx_bruto, campos, valor = self.itens_visiveis[pos]
         com_fav = self._com_favorito_ativo()
         dados_iniciais = (*campos, valor)
+        capa_atual = Biblioteca._extrair_capa_linha(self.linhas_brutas[idx_bruto], com_favorito=com_fav)
 
-        dialogo = DialogoLivro(self, com_favorito=com_fav, dados_iniciais=dados_iniciais)
+        dialogo = DialogoLivro(
+            self,
+            com_favorito=com_fav,
+            dados_iniciais=dados_iniciais,
+            capa_inicial=capa_atual,
+        )
         self.wait_window(dialogo)
         if dialogo.resultado is None:
             return
 
-        novos_campos, novo_valor = dialogo.resultado
-        self.linhas_brutas[idx_bruto] = Biblioteca._formatar_linha_csv(novos_campos, novo_valor)
+        novos_campos, novo_valor, nova_capa = dialogo.resultado
+        self.linhas_brutas[idx_bruto] = Biblioteca._formatar_linha_csv(
+            novos_campos, novo_valor, capa=nova_capa
+        )
         Biblioteca._salvar_linhas_brutas(self._caminho_ativo(), self.linhas_brutas)
         self.recarregar_dados()
 
@@ -1651,8 +2104,9 @@ class BibliotecaApp(tk.Tk):
         idx_bruto, campos, valor = self.itens_visiveis[pos]
         nome, fav_atual, categoria, autor = campos
         novo_fav = "~" if fav_atual == "★" else "★"
+        capa_atual = Biblioteca._extrair_capa_linha(self.linhas_brutas[idx_bruto], com_favorito=True)
         self.linhas_brutas[idx_bruto] = Biblioteca._formatar_linha_csv(
-            [nome, novo_fav, categoria, autor], valor
+            [nome, novo_fav, categoria, autor], valor, capa=capa_atual
         )
         Biblioteca._salvar_linhas_brutas(Biblioteca.arquivoLivros, self.linhas_brutas)
         self.recarregar_dados()
@@ -1692,10 +2146,12 @@ class BibliotecaApp(tk.Tk):
             return
 
         favorito = "★" if resposta else "~"
+        capa_atual = Biblioteca._extrair_capa_linha(self.linhas_brutas[idx_bruto], com_favorito=False)
         Biblioteca._adicionar_registro(
             Biblioteca.arquivoLivros,
             [nome, favorito, categoria, autor],
             valor,
+            capa=capa_atual,
         )
         del self.linhas_brutas[idx_bruto]
         Biblioteca._salvar_linhas_brutas(Biblioteca.arquivoListaDesejo, self.linhas_brutas)

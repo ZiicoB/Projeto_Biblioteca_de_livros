@@ -9,6 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 arquivoLivros = os.path.join(BASE_DIR, "Arquivos", "Livros.csv")
 arquivoCategorias = os.path.join(BASE_DIR, "Arquivos", "Categorias.csv")
 arquivoListaDesejo = os.path.join(BASE_DIR, "Arquivos", "ListaDesejos.csv")
+pastaCapas = os.path.join(BASE_DIR, "Arquivos", "Capas")
 
 # Cores ANSI
 vermelho = "\033[91m"
@@ -135,8 +136,9 @@ def _editar_categoria(antiga, nova):
         alterou = False
         for idx_bruto, campos, valor in validos:
             if campos[idx_cat].casefold() == alvo:
+                capa = _extrair_capa_linha(linhas_brutas[idx_bruto], com_favorito=com_fav)
                 campos[idx_cat] = nome_novo
-                linhas_brutas[idx_bruto] = _formatar_linha_csv(campos, valor)
+                linhas_brutas[idx_bruto] = _formatar_linha_csv(campos, valor, capa=capa)
                 alterou = True
         if alterou:
             _salvar_linhas_brutas(caminho, linhas_brutas)
@@ -156,12 +158,24 @@ def _deletar_categoria(nome):
     return True
 
 
-def _formatar_linha_csv(campos, valor):
-    """Serializa uma linha CSV única com escape apropriado."""
+def _formatar_linha_csv(campos, valor, capa=""):
+    """Serializa uma linha CSV única com escape apropriado e capa opcional."""
     buffer = io.StringIO()
     escritor = csv.writer(buffer, lineterminator="\n")
-    escritor.writerow([*campos, f"{valor:.2f}"])
+    linha = [*campos, f"{valor:.2f}"]
+    if capa and capa.strip():
+        linha.append(capa.strip())
+    escritor.writerow(linha)
     return buffer.getvalue()
+
+
+def _extrair_capa_linha(linha_bruta, com_favorito=True):
+    """Extrai o caminho/nome da capa opcional de uma linha CSV bruta."""
+    min_colunas = 5 if com_favorito else 4
+    linha = next(csv.reader([linha_bruta]), [])
+    if len(linha) > min_colunas:
+        return linha[min_colunas].strip()
+    return ""
 
 
 def _carregar_linhas_arquivo(caminho, com_favorito=True):
@@ -205,12 +219,15 @@ def _salvar_linhas_brutas(caminho, linhas_brutas):
         arquivo.writelines(linhas_brutas)
 
 
-def _adicionar_registro(caminho, campos, valor):
+def _adicionar_registro(caminho, campos, valor, capa=""):
     """Anexa um novo registro validado ao final do arquivo CSV."""
     _garantir_arquivo(caminho)
     with open(caminho, "a", encoding="utf-8", newline="") as arquivo:
         escritor = csv.writer(arquivo, lineterminator="\n")
-        escritor.writerow([*campos, f"{valor:.2f}"])
+        linha = [*campos, f"{valor:.2f}"]
+        if capa and capa.strip():
+            linha.append(capa.strip())
+        escritor.writerow(linha)
 
 
 def _avisar_linhas_invalidas(qtd_invalidas):
@@ -558,7 +575,8 @@ def _mover_para_meus_livros(linhas_brutas, idx_bruto, campos, valor):
         return False
 
     nome, categoria, autor = campos
-    _adicionar_registro(arquivoLivros, [nome, favorito, categoria, autor], valor)
+    capa = _extrair_capa_linha(linhas_brutas[idx_bruto], com_favorito=False)
+    _adicionar_registro(arquivoLivros, [nome, favorito, categoria, autor], valor, capa=capa)
     del linhas_brutas[idx_bruto]
     _salvar_linhas_brutas(arquivoListaDesejo, linhas_brutas)
 
@@ -668,7 +686,8 @@ def _gerenciar_lista(caminho, com_favorito=True, msg_vazia="Nenhum livro cadastr
                 if com_favorito
                 else [novo_nome, nova_cat, novo_autor]
             )
-            linhas_brutas[idx_bruto] = _formatar_linha_csv(novos_campos, novo_valor)
+            capa_atual = _extrair_capa_linha(linhas_brutas[idx_bruto], com_favorito=com_favorito)
+            linhas_brutas[idx_bruto] = _formatar_linha_csv(novos_campos, novo_valor, capa=capa_atual)
             _salvar_linhas_brutas(caminho, linhas_brutas)
 
             print(f"Livro atualizado!\nPressione {vermelho}(Enter){fimCor}")
