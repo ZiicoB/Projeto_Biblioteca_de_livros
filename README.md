@@ -5,7 +5,7 @@ Desenvolvido por **Adriano Barnard Medeiros**.
 
 O programa gerencia uma biblioteca pessoal de livros, permitindo controlar os livros que você já possui (**Meus Livros**) e os que pretende comprar (**Lista de Desejos**), organizados por **Título, Favorito, Categoria, Autor, Valor** e **Capa (opcional)**, com persistência em arquivos CSV na pasta `Arquivos/`.
 
----
+
 
 ## Como Abrir o Programa
 
@@ -29,7 +29,6 @@ Para usar a versão original em texto no terminal:
 python Biblioteca.py
 ```
 
----
 
 ## Como Usar pela Interface Gráfica
 
@@ -60,29 +59,26 @@ python Biblioteca.py
 | `Ctrl + M` | Mover livro da Lista de Desejos para Meus Livros |
 | `Esc` | Fechar janela ou sair da tela Como Usar |
 
----
+
 
 ## Imagens da Interface
 
-<!-- Substitua os caminhos abaixo pelas novas capturas colocadas em ./Arquivos/Imagens/ -->
-> *Espaço reservado para as novas capturas de tela da interface gráfica:*
-
-| Tela Principal (Meus Livros) | Cadastro / Edição com Capa |
+| (Meus Livros) | Menu |
 | :---: | :---: |
-| ![Interface Meus Livros](./Arquivos/Imagens/Tabela.png) | ![Cadastro com Capa](./Arquivos/Imagens/Menu.png) |
+| ![Meus Livros](./Arquivos/Imagens/Tabela.png) | ![Cadastro com Capa](./Arquivos/Imagens/Menu.png) |
 
-| Gerenciar Categorias | Tela Como Usar |
+| Tela Inicial | Categorias Cadastradas |
 | :---: | :---: |
-| *Adicione aqui sua captura de Categorias* | *Adicione aqui sua captura de Como Usar* |
+| <img width="520" alt="image" src="https://github.com/user-attachments/assets/aa681540-4eac-4924-954b-ef0eb31dc8a7" /> | <img width="360" alt="image" src="https://github.com/user-attachments/assets/ee9606ff-7267-4781-b058-efa20814cb5a" /> |
 
----
+
 
 ## Manual e Fluxograma
 
 [<img src="./Arquivos/Imagens/pdf_icone.png" width="80">](./Arquivos/Manual/Manual_da_Biblioteca.pdf)
 [<img src="./Arquivos/Imagens/Fluxograma.png" width="80">](./Arquivos/Manual/Fluxograma.pdf)
 
----
+
 
 ## Atualizações (25/11/2026)
 *Correções feitas com uso de IA.*
